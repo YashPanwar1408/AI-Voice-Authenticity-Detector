@@ -11,12 +11,7 @@ Usage:
 from __future__ import annotations
 
 import os
-import io
 import numpy as np
-import librosa
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 
 try:
     import tensorflow as tf  # type: ignore
@@ -39,35 +34,208 @@ MODEL_PATH = next((p for p in MODEL_CANDIDATES if os.path.exists(p)), MODEL_CAND
 SAMPLE_RATE = 16000
 IMG_SIZE    = 128
 N_MELS      = 128
+N_FFT       = 2048
+HOP_LENGTH  = 512
+TOP_DB      = 80.0
 # ───────────────────────────────────────────────────────────────────────────────
 
 # Load model once at module level
 _model = None
+_mel_w = None
 
 
-def _load_audio_mono(file_path: str) -> tuple[np.ndarray, int]:
-    """Load audio without downmix cancellation and resample to SAMPLE_RATE."""
-    y, sr = librosa.load(file_path, sr=None, mono=False)
+def _linear_resample_1d(x: tf.Tensor, n_out: tf.Tensor) -> tf.Tensor:
+    """Linearly resample a 1D signal to `n_out` samples (TensorFlow-only).
 
-    # librosa returns (n_channels, n_samples) when mono=False
-    if y.ndim == 2 and y.shape[0] > 1:
-        channel_rms = np.sqrt(np.mean(np.square(y), axis=1))
-        best_channel = int(np.argmax(channel_rms))
-        y = y[best_channel]
+    We avoid optional deps (librosa/tensorflow-io). This is sufficient for
+    inference-time resampling when inputs aren't already at `SAMPLE_RATE`.
+    """
+    if tf is None:
+        raise ImportError("TensorFlow is required.")
 
-    if int(sr) != SAMPLE_RATE:
-        y = librosa.resample(y, orig_sr=sr, target_sr=SAMPLE_RATE)
-        sr = SAMPLE_RATE
+    x = tf.cast(tf.reshape(x, [-1]), tf.float32)
+    n_out = tf.maximum(tf.cast(n_out, tf.int32), 1)
+    n_in = tf.shape(x)[0]
 
-    # The model was trained mostly on longer clips; very short clips often
-    # get misclassified. Loop/pad short audio to a minimum duration.
+    def _tile_first() -> tf.Tensor:
+        first = x[:1]
+        first = tf.cond(
+            tf.shape(first)[0] > 0,
+            lambda: first,
+            lambda: tf.zeros([1], dtype=tf.float32),
+        )
+        return tf.tile(first, [n_out])
+
+    def _interp() -> tf.Tensor:
+        n_in_f = tf.cast(n_in, tf.float32)
+        pos = tf.linspace(0.0, n_in_f - 1.0, n_out)
+        idx0 = tf.cast(tf.floor(pos), tf.int32)
+        idx1 = tf.minimum(idx0 + 1, n_in - 1)
+        w = pos - tf.cast(idx0, tf.float32)
+        x0 = tf.gather(x, idx0)
+        x1 = tf.gather(x, idx1)
+        return (1.0 - w) * x0 + w * x1
+
+    return tf.cond(tf.logical_or(n_in < 2, n_out < 2), _tile_first, _interp)
+
+
+def _hz_to_mel_slaney(freq_hz: np.ndarray) -> np.ndarray:
+    """Hz → mel (Slaney-style), matching librosa when htk=False."""
+    freq_hz = np.asarray(freq_hz, dtype=np.float64)
+    f_sp = 200.0 / 3.0
+    mels = freq_hz / f_sp
+
+    min_log_hz = 1000.0
+    min_log_mel = min_log_hz / f_sp
+    logstep = np.log(6.4) / 27.0
+
+    log_t = freq_hz >= min_log_hz
+    mels[log_t] = min_log_mel + np.log(freq_hz[log_t] / min_log_hz) / logstep
+    return mels.astype(np.float64)
+
+
+def _mel_to_hz_slaney(mels: np.ndarray) -> np.ndarray:
+    """Mel (Slaney-style) → Hz, matching librosa when htk=False."""
+    mels = np.asarray(mels, dtype=np.float64)
+    f_sp = 200.0 / 3.0
+    freqs = f_sp * mels
+
+    min_log_hz = 1000.0
+    min_log_mel = min_log_hz / f_sp
+    logstep = np.log(6.4) / 27.0
+
+    log_t = mels >= min_log_mel
+    freqs[log_t] = min_log_hz * np.exp(logstep * (mels[log_t] - min_log_mel))
+    return freqs.astype(np.float64)
+
+
+def _librosa_mel_filterbank(
+    *,
+    sr: int,
+    n_fft: int,
+    n_mels: int,
+    fmin: float,
+    fmax: float,
+) -> np.ndarray:
+    """Create a librosa-style mel filterbank (htk=False, norm='slaney').
+
+    Returns:
+        weights: shape (n_mels, 1 + n_fft//2), float32
+    """
+    n_freqs = 1 + n_fft // 2
+    fft_freqs = np.linspace(0.0, float(sr) / 2.0, n_freqs, dtype=np.float64)
+
+    mel_min = _hz_to_mel_slaney(np.array([fmin], dtype=np.float64))[0]
+    mel_max = _hz_to_mel_slaney(np.array([fmax], dtype=np.float64))[0]
+    mels = np.linspace(mel_min, mel_max, n_mels + 2, dtype=np.float64)
+    hz = _mel_to_hz_slaney(mels)
+
+    weights = np.zeros((n_mels, n_freqs), dtype=np.float64)
+    for i in range(n_mels):
+        left = hz[i]
+        center = hz[i + 1]
+        right = hz[i + 2]
+
+        # Avoid division by zero in pathological cases
+        if center <= left:
+            center = left + 1e-6
+        if right <= center:
+            right = center + 1e-6
+
+        lower = (fft_freqs - left) / (center - left)
+        upper = (right - fft_freqs) / (right - center)
+        weights[i, :] = np.maximum(0.0, np.minimum(lower, upper))
+
+    # Slaney-style normalization: constant energy per channel
+    enorm = 2.0 / (hz[2 : n_mels + 2] - hz[0:n_mels])
+    weights *= enorm[:, np.newaxis]
+
+    return weights.astype(np.float32)
+
+
+def _get_mel_weight_matrix() -> tf.Tensor:
+    """Return cached mel weights shaped for tf.matmul(power_spec, W)."""
+    global _mel_w
+    if tf is None:
+        raise ImportError("TensorFlow is required.")
+    if _mel_w is None:
+        mel_basis = _librosa_mel_filterbank(
+            sr=SAMPLE_RATE,
+            n_fft=N_FFT,
+            n_mels=N_MELS,
+            fmin=0.0,
+            fmax=float(SAMPLE_RATE) / 2.0,
+        )
+        # librosa returns (n_mels, n_freqs); we want (n_freqs, n_mels)
+        _mel_w = tf.constant(mel_basis.T, dtype=tf.float32)
+    return _mel_w
+
+
+def _load_audio_mono(file_path: str) -> tuple[tf.Tensor, int]:
+    """Decode WAV and return mono float32 audio at SAMPLE_RATE.
+
+    Streamlit Cloud note: we avoid librosa/soundfile and rely on TensorFlow.
+    The Streamlit app converts uploads to PCM S16LE WAV at 16 kHz.
+    """
+    if tf is None:
+        raise ImportError("TensorFlow is required.")
+
+    wav_bytes = tf.io.read_file(file_path)
+    audio, sr = tf.audio.decode_wav(wav_bytes, desired_channels=-1)
+    sr_i = int(sr.numpy())
+
+    # audio shape: (n_samples, n_channels)
+    if audio.shape.rank == 2 and int(audio.shape[1]) > 1:
+        rms = tf.sqrt(tf.reduce_mean(tf.square(audio), axis=0))
+        best = tf.argmax(rms)
+        audio = audio[:, best]
+    else:
+        audio = tf.squeeze(audio, axis=-1) if audio.shape.rank == 2 else tf.squeeze(audio)
+
+    # Resample if needed (shouldn't happen if conversion forced 16 kHz)
+    if sr_i != SAMPLE_RATE and sr_i > 0:
+        n_in = tf.shape(audio)[0]
+        n_out = tf.cast(tf.round(tf.cast(n_in, tf.float32) * (SAMPLE_RATE / float(sr_i))), tf.int32)
+        audio = _linear_resample_1d(audio, n_out)
+        sr_i = SAMPLE_RATE
+
+    # Short-clip fix: loop to minimum duration
     min_seconds = 5.0
     target_len = int(min_seconds * SAMPLE_RATE)
-    if len(y) > 0 and len(y) < target_len:
-        reps = int(np.ceil(target_len / len(y)))
-        y = np.tile(y, reps)[:target_len]
+    n = int(audio.shape[0]) if audio.shape.rank == 1 and audio.shape[0] is not None else None
+    if n is not None and n > 0 and n < target_len:
+        reps = int(np.ceil(target_len / n))
+        audio = tf.tile(audio, [reps])[:target_len]
+    else:
+        n_dyn = tf.shape(audio)[0]
+        audio = tf.cond(
+            tf.logical_and(n_dyn > 0, n_dyn < target_len),
+            lambda: tf.tile(audio, [tf.cast(tf.math.ceil(target_len / tf.cast(n_dyn, tf.float32)), tf.int32)])[:target_len],
+            lambda: audio,
+        )
 
-    return y, int(sr)
+    return tf.cast(audio, tf.float32), sr_i
+
+
+def _magma_like_colormap_256() -> np.ndarray:
+    """A small magma-like ramp (not exact), 256x3 float32 in [0,1]."""
+    # Anchor points (x in [0,1]) from dark purple -> red -> orange -> yellow.
+    anchors_x = np.array([0.0, 0.25, 0.5, 0.75, 1.0], dtype=np.float32)
+    anchors_rgb = np.array(
+        [
+            [0.02, 0.01, 0.10],
+            [0.25, 0.03, 0.35],
+            [0.65, 0.12, 0.25],
+            [0.95, 0.45, 0.10],
+            [0.99, 0.95, 0.55],
+        ],
+        dtype=np.float32,
+    )
+    xs = np.linspace(0.0, 1.0, 256, dtype=np.float32)
+    out = np.zeros((256, 3), dtype=np.float32)
+    for c in range(3):
+        out[:, c] = np.interp(xs, anchors_x, anchors_rgb[:, c]).astype(np.float32)
+    return out
 
 
 def _get_model() -> tf.keras.Model:
@@ -91,31 +259,54 @@ def _audio_to_spectrogram(file_path: str) -> np.ndarray:
     Returns:
         numpy array of shape (128, 128, 3), float32, values in [0, 1].
     """
-    # Load audio (robust to multi-channel recordings)
+    if tf is None:
+        raise ImportError("TensorFlow is required.")
+
     audio, sr = _load_audio_mono(file_path)
 
-    # Mel spectrogram → dB scale
-    mel_spec = librosa.feature.melspectrogram(y=audio, sr=sr, n_mels=N_MELS)
-    mel_db = librosa.power_to_db(mel_spec, ref=np.max)
+    # Match librosa.stft(center=True) by padding n_fft//2 on both sides.
+    pad = N_FFT // 2
+    audio = tf.pad(audio, paddings=[[pad, pad]])
 
-    # Render *exactly like* src.generate_spectrograms.save_spectrogram()
-    dpi = 100
-    fig_size = IMG_SIZE / dpi
-    fig, ax = plt.subplots(1, 1, figsize=(fig_size, fig_size), dpi=dpi)
-    ax.imshow(mel_db, aspect="auto", origin="lower", cmap="magma")
-    ax.axis("off")
-    plt.subplots_adjust(left=0, right=1, top=1, bottom=0)
+    stft = tf.signal.stft(
+        audio,
+        frame_length=N_FFT,
+        frame_step=HOP_LENGTH,
+        fft_length=N_FFT,
+        window_fn=tf.signal.hann_window,
+        pad_end=False,
+    )
+    spec = tf.abs(stft) ** 2
+    mel_w = _get_mel_weight_matrix()
+    mel = tf.matmul(spec, mel_w)  # (frames, n_mels)
+    mel = tf.transpose(mel)       # (n_mels, frames)
 
-    png_buf = io.BytesIO()
-    fig.savefig(png_buf, format="png", dpi=dpi, bbox_inches="tight", pad_inches=0)
-    plt.close(fig)
+    # librosa.power_to_db(mel, ref=np.max, top_db=80)
+    mel = tf.maximum(mel, 1e-10)
+    log_mel = 10.0 * tf.math.log(mel) / tf.math.log(10.0)
+    ref = tf.reduce_max(log_mel)
+    mel_db = log_mel - ref
+    mel_db = tf.maximum(mel_db, -TOP_DB)
 
-    png_buf.seek(0)
-    img_pil = Image.open(png_buf).convert("RGB")
+    # Match origin='lower' by flipping vertically for image coordinates
+    mel_db = tf.reverse(mel_db, axis=[0])
+
+    mel_np = mel_db.numpy().astype(np.float32)
+    vmin = float(np.min(mel_np))
+    vmax = float(np.max(mel_np))
+    denom = (vmax - vmin) if (vmax - vmin) > 1e-6 else 1.0
+    norm = (mel_np - vmin) / denom
+    norm = np.clip(norm, 0.0, 1.0)
+
+    cmap = _magma_like_colormap_256()
+    idx = (norm * 255.0).astype(np.uint8)
+    rgb = cmap[idx]  # (n_mels, frames, 3)
+
+    img = (rgb * 255.0).astype(np.uint8)
+    img_pil = Image.fromarray(img, mode="RGB")
     img_pil = img_pil.resize((IMG_SIZE, IMG_SIZE), resample=Image.BILINEAR)
-
-    img_arr = np.array(img_pil, dtype=np.float32)
-    return img_arr / 255.0
+    img_arr = np.asarray(img_pil, dtype=np.float32) / 255.0
+    return img_arr
 
 
 def predict_audio(file_path: str) -> tuple[str, float]:

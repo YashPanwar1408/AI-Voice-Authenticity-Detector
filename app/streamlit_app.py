@@ -3,10 +3,10 @@ import sys
 import tempfile
 import io
 import subprocess
+import wave
 
 import streamlit as st
 import numpy as np
-import soundfile as sf
 from imageio_ffmpeg import get_ffmpeg_exe
 
 # Allow imports from project root
@@ -39,66 +39,94 @@ def _wav_stats(
 ) -> tuple[float | None, float | None, int | None, float | None, int | None]:
     """Return (rms, peak, sample_rate, duration_seconds, channels) when possible."""
     try:
-        data, sr = sf.read(io.BytesIO(wav_bytes), dtype="float32", always_2d=True)
+        with wave.open(io.BytesIO(wav_bytes), "rb") as wf:
+            sr = int(wf.getframerate())
+            channels = int(wf.getnchannels())
+            sampwidth = int(wf.getsampwidth())
+            nframes = int(wf.getnframes())
+            raw = wf.readframes(nframes)
 
-        # data shape: (n_samples, n_channels)
-        channels = int(data.shape[1])
-        channel_rms = np.sqrt(np.mean(np.square(data), axis=0))
-        best_channel = int(np.argmax(channel_rms))
-        mono = data[:, best_channel]
+        if sampwidth != 2 or sr <= 0 or nframes <= 0:
+            # We intentionally export PCM S16LE in ffmpeg conversion.
+            return None, None, sr or None, (nframes / sr) if sr else None, channels or None
 
-        rms = float(channel_rms[best_channel])
-        peak = float(np.max(np.abs(mono)))
-        duration = float(len(mono) / sr) if sr else None
-        return rms, peak, int(sr), duration, channels
+        x = np.frombuffer(raw, dtype=np.int16)
+        if channels > 1:
+            x = x.reshape(-1, channels)
+            # pick loudest channel
+            channel_rms = np.sqrt(np.mean(np.square(x.astype(np.float32)), axis=0))
+            best_channel = int(np.argmax(channel_rms))
+            x = x[:, best_channel]
+
+        xf = x.astype(np.float32) / 32768.0
+        rms = float(np.sqrt(np.mean(np.square(xf))))
+        peak = float(np.max(np.abs(xf)))
+        duration = float(len(xf) / sr) if sr else None
+        return rms, peak, sr, duration, channels
     except Exception:
         return None, None, None, None, None
 
 
-def _convert_to_wav(uploaded_bytes: bytes, input_ext: str) -> bytes:
-    """Convert common audio formats to WAV bytes.
+def _convert_to_wav(uploaded_bytes: bytes) -> bytes:
+    """Convert audio to PCM S16LE WAV bytes.
 
     Uses a bundled `ffmpeg` executable via `imageio-ffmpeg`.
+    Always converts (even if the input is WAV) to ensure TensorFlow can decode it.
     """
-    ext = (input_ext or "").lower().lstrip(".")
-    if ext == "wav":
-        return uploaded_bytes
 
     ffmpeg = get_ffmpeg_exe()
 
-    # Decode from stdin and write WAV to stdout.
-    # Preserve channel count; downstream will select the best channel.
-    cmd = [
-        ffmpeg,
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-i",
-        "pipe:0",
-        "-vn",
-        "-acodec",
-        "pcm_s16le",
-        "-f",
-        "wav",
-        "pipe:1",
-    ]
+    # Important:
+    # Writing WAV to stdout (pipe) makes ffmpeg emit an "unknown length" WAV
+    # header with a 0xFFFFFFFF data chunk size. TensorFlow's decode_wav rejects
+    # that. So we write a temp .wav file to get a proper RIFF header.
 
+    tmp_path = None
     try:
-        proc = subprocess.run(
-            cmd,
-            input=uploaded_bytes,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=True,
-        )
-    except subprocess.CalledProcessError as e:
-        err = (e.stderr or b"").decode("utf-8", errors="replace")
-        raise RuntimeError(f"ffmpeg conversion failed: {err.strip()}")
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
+            tmp_path = tmp.name
 
-    if not proc.stdout:
-        raise RuntimeError("ffmpeg conversion produced empty output")
+        cmd = [
+            ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            "pipe:0",
+            "-vn",
+            "-acodec",
+            "pcm_s16le",
+            "-ar",
+            "16000",
+            "-ac",
+            "1",
+            tmp_path,
+        ]
 
-    return proc.stdout
+        try:
+            proc = subprocess.run(
+                cmd,
+                input=uploaded_bytes,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=True,
+            )
+        except subprocess.CalledProcessError as e:
+            err = (e.stderr or b"").decode("utf-8", errors="replace")
+            raise RuntimeError(f"ffmpeg conversion failed: {err.strip()}")
+
+        wav_bytes = open(tmp_path, "rb").read()
+        if not wav_bytes:
+            raise RuntimeError("ffmpeg conversion produced empty output")
+        return wav_bytes
+
+    finally:
+        if tmp_path is not None:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
 
 
 
@@ -118,7 +146,7 @@ with st.container(border=True):
     wav_bytes: bytes | None = None
     if uploaded_bytes:
         try:
-            wav_bytes = _convert_to_wav(uploaded_bytes, uploaded_ext)
+            wav_bytes = _convert_to_wav(uploaded_bytes)
         except Exception as e:
             st.error(f"Could not decode/convert '{uploaded_file.name}': {e}")
             st.stop()
