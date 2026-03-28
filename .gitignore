@@ -1,0 +1,42 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.pyd
+*.pyo
+*.pdb
+
+.ipynb_checkpoints/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.cache/
+
+# Streamlit
+.streamlit/
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+
+# Local datasets / generated spectrograms (can be very large)
+data/audio/**
+!data/audio/**/.gitkeep
+data/spectrograms/**
+!data/spectrograms/**/.gitkeep
+
+# Optional: keep notebooks outputs local
+notebooks/.ipynb_checkpoints/
+
+# Temporary files
+*.wav
+*.mp3
+*.m4a
+*.flac
+*.ogg
+*.aac
+*.wma
+*.webm
+*.mp4
+temp/
+tmp/
