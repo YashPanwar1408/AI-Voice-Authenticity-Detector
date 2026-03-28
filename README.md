@@ -23,6 +23,8 @@ Then it will render below:
 - **Windows** (this repo is currently set up/tested on Windows)
 - **Python 3.12** (recommended; TensorFlow is not reliably available on newer prerelease versions)
 
+If you deploy on **Streamlit Community Cloud**, this repo includes `runtime.txt` to force **Python 3.12** (TensorFlow does not install on Python 3.14+).
+
 ## Setup
 
 From the project root:

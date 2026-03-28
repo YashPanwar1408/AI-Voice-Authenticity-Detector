@@ -1,8 +1,13 @@
-streamlit
-tensorflow
-librosa
-matplotlib
-pillow
-numpy
-soundfile
-imageio-ffmpeg
+streamlit==1.46.1
+
+# TensorFlow is not available for Python 3.14+; this project targets Python 3.12
+tensorflow==2.21.0
+
+librosa==0.11.0
+matplotlib==3.10.5
+pillow==11.3.0
+numpy==2.1.3
+soundfile==0.13.1
+
+# Bundled ffmpeg binary for audio conversion (no system ffmpeg required)
+imageio-ffmpeg==0.6.0
