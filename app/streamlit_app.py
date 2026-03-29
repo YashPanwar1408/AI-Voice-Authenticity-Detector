@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import io
 import os
+import sys
 import subprocess
 import tempfile
 import wave
+from pathlib import Path
 from typing import Any
 
 import matplotlib.pyplot as plt
@@ -17,6 +19,14 @@ import streamlit as st
 import librosa
 import librosa.display
 from imageio_ffmpeg import get_ffmpeg_exe
+
+
+# Ensure project root is importable so `import src.*` works even when Streamlit
+# is launched from inside the `app/` directory.
+_HERE = Path(__file__).resolve().parent
+_PROJECT_ROOT = _HERE.parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 API_BASE_URL = "http://127.0.0.1:8000"
@@ -450,21 +460,13 @@ def _render_analytics_dashboard_page() -> None:
 st.title("AI Voice Detector")
 st.caption("Frontend analytics dashboard powered by a FastAPI inference backend.")
 
-with st.sidebar:
-    st.header("Navigation")
-    page = st.radio(
-        "Go to",
-        ["Single Prediction", "Batch Prediction", "Analytics Dashboard"],
-        label_visibility="collapsed",
-    )
-    st.divider()
-    st.caption("Backend")
-    st.code(API_BASE_URL)
+tab_single, tab_batch, tab_analytics = st.tabs(["Single Prediction", "Batch Prediction", "Analytics Dashboard"])
 
-
-if page == "Single Prediction":
+with tab_single:
     _render_single_prediction_page()
-elif page == "Batch Prediction":
+
+with tab_batch:
     _render_batch_prediction_page()
-else:
+
+with tab_analytics:
     _render_analytics_dashboard_page()
