@@ -47,16 +47,15 @@ This project is intentionally decoupled for scalability and clean separation of 
 
 ```mermaid
 flowchart LR
-    U[User] --> S[Streamlit Frontend]
-    S -->|POST /predict| A[FastAPI Backend]
-  A --> C[Audio Conversion\nffmpeg → 16kHz mono WAV]
-  C --> P[Preprocessing\nWAV → Mel Spectrogram\n128×128]
-  P --> M[CNN Model\nTensorFlow/Keras]
+  U[User] --> S[Streamlit Frontend]
+  S -->|POST /predict| A[FastAPI Backend]
+  A --> C[Audio Conversion<br/>ffmpeg -> 16kHz mono WAV]
+  C --> P[Preprocessing<br/>WAV -> Mel Spectrogram<br/>128x128]
+  P --> M[CNN Model<br/>TensorFlow/Keras]
   M --> A
-    A --> D[(SQLite\nPrediction History)]
-    A -->|JSON (label, confidence)| S
-
-    S -. optional .-> G[Grad-CAM Explainability\nheatmap + overlay]
+  A --> D[(SQLite<br/>Prediction History)]
+  A -->|JSON response| S
+  S -. optional .-> G[Grad-CAM Explainability<br/>heatmap + overlay]
 ```
 
 ---
