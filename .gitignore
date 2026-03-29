@@ -42,3 +42,8 @@ notebooks/.ipynb_checkpoints/
 *.mp4
 temp/
 tmp/
+
+# Local SQLite artifacts (runtime-generated)
+*.sqlite3
+*.sqlite3-*
+*.db

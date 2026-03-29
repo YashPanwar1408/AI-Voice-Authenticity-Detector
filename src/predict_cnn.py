@@ -20,6 +20,8 @@ except Exception:  # pragma: no cover
 
 from PIL import Image
 
+from src.gradcam import generate_gradcam, overlay_heatmap
+
 
 # ── Config (must match training settings) ──────────────────────────────────────
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -309,7 +311,11 @@ def _audio_to_spectrogram(file_path: str) -> np.ndarray:
     return img_arr
 
 
-def predict_audio(file_path: str) -> tuple[str, float]:
+def predict_audio(
+    file_path: str,
+    *,
+    return_heatmap: bool = False,
+) -> tuple[str, float] | tuple[str, float, np.ndarray, np.ndarray, np.ndarray]:
     """
     Predict whether an audio file is REAL or FAKE.
 
@@ -319,6 +325,11 @@ def predict_audio(file_path: str) -> tuple[str, float]:
     Returns:
         label:      "REAL" or "FAKE"
         confidence: Probability score in [0.0, 1.0] for the predicted class.
+
+        If return_heatmap=True, also returns:
+            spectrogram_rgb: (128, 128, 3) float32 in [0,1]
+            heatmap_rgb:     (128, 128, 3) uint8
+            overlay_rgb:     (128, 128, 3) uint8
 
     Raises:
         FileNotFoundError: If the audio file or model is missing.
@@ -349,7 +360,16 @@ def predict_audio(file_path: str) -> tuple[str, float]:
             label      = "FAKE"
             confidence = 1.0 - raw_score
 
-        return label, round(confidence, 4)
+        confidence = round(confidence, 4)
+
+        if not return_heatmap:
+            return label, confidence
+
+        class_index = 1 if label == "REAL" else 0
+        heatmap = generate_gradcam(model=model, input_image=img_batch, class_index=class_index)
+        heatmap_rgb, overlay_rgb = overlay_heatmap(image_rgb=img, heatmap=heatmap, alpha=0.45, colormap="jet")
+
+        return label, confidence, img, heatmap_rgb, overlay_rgb
 
     except FileNotFoundError:
         raise
