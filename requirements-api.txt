@@ -1,0 +1,17 @@
+# Backend (FastAPI) runtime deps
+
+# Model inference
+numpy
+pillow
+
+# TensorFlow: use smaller CPU wheels on Linux (Railway/Streamlit Cloud)
+tensorflow-cpu==2.21.0; platform_system=="Linux"
+tensorflow==2.21.0; platform_system=="Windows"
+
+# Audio conversion (bundled ffmpeg binary)
+imageio-ffmpeg==0.6.0
+
+# Backend API
+fastapi
+uvicorn
+python-multipart

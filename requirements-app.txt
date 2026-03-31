@@ -1,0 +1,14 @@
+# Streamlit frontend + local analytics/plots
+streamlit==1.55.0
+
+requests
+pandas
+matplotlib
+seaborn
+
+# Audio visualization utilities
+librosa
+soundfile
+
+# Bundled ffmpeg binary for audio conversion (no system ffmpeg required)
+imageio-ffmpeg==0.6.0

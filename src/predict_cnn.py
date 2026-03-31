@@ -13,6 +13,8 @@ from __future__ import annotations
 import os
 import numpy as np
 
+from src.magma_lut import MAGMA_256
+
 try:
     import tensorflow as tf  # type: ignore
 except Exception:  # pragma: no cover
@@ -27,9 +29,9 @@ except Exception:  # pragma: no cover
     librosa = None  # type: ignore
 
 try:  # pragma: no cover
-    from matplotlib import cm as mpl_cm  # type: ignore
+    import matplotlib  # type: ignore
 except Exception:  # pragma: no cover
-    mpl_cm = None  # type: ignore
+    matplotlib = None  # type: ignore
 
 from PIL import Image
 
@@ -232,24 +234,8 @@ def _load_audio_mono(file_path: str) -> tuple[tf.Tensor, int]:
 
 
 def _magma_like_colormap_256() -> np.ndarray:
-    """A small magma-like ramp (not exact), 256x3 float32 in [0,1]."""
-    # Anchor points (x in [0,1]) from dark purple -> red -> orange -> yellow.
-    anchors_x = np.array([0.0, 0.25, 0.5, 0.75, 1.0], dtype=np.float32)
-    anchors_rgb = np.array(
-        [
-            [0.02, 0.01, 0.10],
-            [0.25, 0.03, 0.35],
-            [0.65, 0.12, 0.25],
-            [0.95, 0.45, 0.10],
-            [0.99, 0.95, 0.55],
-        ],
-        dtype=np.float32,
-    )
-    xs = np.linspace(0.0, 1.0, 256, dtype=np.float32)
-    out = np.zeros((256, 3), dtype=np.float32)
-    for c in range(3):
-        out[:, c] = np.interp(xs, anchors_x, anchors_rgb[:, c]).astype(np.float32)
-    return out
+    """Exact 256-step magma colormap as float32 in [0,1]."""
+    return MAGMA_256
 
 
 def _get_model() -> tf.keras.Model:
@@ -269,9 +255,12 @@ def _get_model() -> tf.keras.Model:
 def _get_mpl_magma():
     global _mpl_magma
     if _mpl_magma is None:
-        if mpl_cm is None:  # pragma: no cover
+        if matplotlib is None:  # pragma: no cover
             raise ImportError("matplotlib is required for magma colormap")
-        _mpl_magma = mpl_cm.get_cmap("magma")
+        if hasattr(matplotlib, "colormaps"):
+            _mpl_magma = matplotlib.colormaps.get_cmap("magma")
+        else:  # pragma: no cover
+            _mpl_magma = matplotlib.cm.get_cmap("magma")
     return _mpl_magma
 
 
@@ -284,8 +273,8 @@ def _audio_to_spectrogram_librosa(file_path: str) -> np.ndarray:
     Returns:
         numpy array of shape (128, 128, 3), float32, values in [0, 1].
     """
-    if librosa is None or mpl_cm is None:
-        raise ImportError("librosa/matplotlib not available")
+    if librosa is None:
+        raise ImportError("librosa not available")
 
     y, sr = librosa.load(file_path, sr=SAMPLE_RATE, mono=True)
     mel = librosa.feature.melspectrogram(
@@ -306,9 +295,13 @@ def _audio_to_spectrogram_librosa(file_path: str) -> np.ndarray:
     norm = (mel_db - vmin) / denom
     norm = np.clip(norm, 0.0, 1.0)
 
-    cmap = _get_mpl_magma()
-    rgba = cmap(norm)  # RGBA float in [0,1]
-    rgb = (rgba[:, :, :3] * 255.0).astype(np.uint8)
+    if matplotlib is not None:
+        cmap = _get_mpl_magma()
+        rgba = cmap(norm)  # RGBA float in [0,1]
+        rgb = (rgba[:, :, :3] * 255.0).astype(np.uint8)
+    else:
+        idx = (norm * 255.0).astype(np.uint8)
+        rgb = (MAGMA_256[idx] * 255.0).astype(np.uint8)
 
     img_pil = Image.fromarray(rgb, mode="RGB")
     img_pil = img_pil.resize((IMG_SIZE, IMG_SIZE), resample=Image.BILINEAR)
@@ -378,7 +371,7 @@ def _audio_to_spectrogram_tf(file_path: str) -> np.ndarray:
 
 def _audio_to_spectrogram(file_path: str) -> np.ndarray:
     """Load a .wav file and convert it to a normalised 128×128 RGB-like array."""
-    if librosa is not None and mpl_cm is not None:
+    if librosa is not None:
         try:
             return _audio_to_spectrogram_librosa(file_path)
         except Exception:
