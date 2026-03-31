@@ -29,7 +29,7 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 
-API_BASE_URL = "ai-voice-authenticity-detector-production.up.railway.app".rstrip("/")
+API_BASE_URL = "https://ai-voice-authenticity-detector-production.up.railway.app".rstrip("/")
 PREDICT_ENDPOINT = f"{API_BASE_URL}/predict"
 HISTORY_ENDPOINT = f"{API_BASE_URL}/history"
 
