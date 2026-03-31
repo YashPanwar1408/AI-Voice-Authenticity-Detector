@@ -1,3 +1,0 @@
-# Local development (frontend + backend)
--r requirements-api.txt
--r requirements-app.txt

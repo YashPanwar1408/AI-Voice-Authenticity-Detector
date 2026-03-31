@@ -142,11 +142,7 @@ PowerShell:
 py -3.12 -m venv .venv
 \.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
-pip install -r requirements-dev.txt
-
-# Notes:
-# - Frontend-only (Streamlit): pip install -r requirements.txt
-# - Backend-only (FastAPI):    pip install -r requirements-api.txt
+pip install -r requirements.txt
 ```
 
 ### 2) Run backend (FastAPI)
@@ -177,13 +173,11 @@ Streamlit runs at: `http://localhost:8501`
 
 - Set the app entrypoint to `app/streamlit_app.py`
 - Ensure Python 3.12 is used (this repo includes `runtime.txt`)
-- Streamlit Cloud installs from the root `requirements.txt` (frontend-only)
 - Update `API_BASE_URL` in the Streamlit app to point to your deployed backend
 
 ### Railway (backend)
 
 - Deploy the `api-server/` service
-- Railway uses `nixpacks.toml` to install `requirements-api.txt` (with pip retries/timeouts)
 - Start command:
 
 ```bash

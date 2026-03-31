@@ -1,4 +1,28 @@
-# Streamlit Cloud installs from the root `requirements.txt`.
-# Keep this file frontend-only to avoid installing TensorFlow on Streamlit.
+streamlit==1.55.0
 
--r requirements-app.txt
+# TensorFlow is not available for Python 3.14+; Streamlit Cloud is forced to 3.12 via runtime.txt
+tensorflow==2.21.0
+
+numpy
+pillow
+requests
+
+# Dashboard / analytics
+pandas
+matplotlib
+seaborn
+librosa
+soundfile
+
+# Bundled ffmpeg binary for audio conversion (no system ffmpeg required)
+imageio-ffmpeg==0.6.0
+
+# Backend API
+fastapi
+uvicorn
+python-multipart
+
+# Training/data-prep only (DON'T install on Streamlit Cloud):
+# - librosa
+# - matplotlib
+# - soundfile
