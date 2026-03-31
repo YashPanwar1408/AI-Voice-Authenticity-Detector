@@ -17,6 +17,7 @@ from imageio_ffmpeg import get_ffmpeg_exe
 _HERE = Path(__file__).resolve().parent
 _PROJECT_ROOT = _HERE.parent
 sys.path.insert(0, str(_PROJECT_ROOT))
+sys.path.insert(0, str(_HERE))
 
 from src import predict_cnn  # noqa: E402
 from services.db_service import DBService, PredictionLog, default_db_path  # noqa: E402
