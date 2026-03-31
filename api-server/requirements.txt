@@ -1,0 +1,14 @@
+# Backend-only dependencies (FastAPI + inference)
+
+# Model inference
+numpy
+pillow
+tensorflow==2.21.0
+
+# Audio conversion (bundled ffmpeg binary)
+imageio-ffmpeg==0.6.0
+
+# Backend API
+fastapi
+uvicorn
+python-multipart
