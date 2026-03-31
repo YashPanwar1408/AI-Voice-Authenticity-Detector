@@ -18,6 +18,19 @@ try:
 except Exception:  # pragma: no cover
     tf = None  # type: ignore
 
+# Optional: use librosa + matplotlib for preprocessing when available.
+# This matches the training spectrogram pipeline more closely than the
+# TensorFlow-only fallback (especially colormap + STFT padding behavior).
+try:  # pragma: no cover
+    import librosa  # type: ignore
+except Exception:  # pragma: no cover
+    librosa = None  # type: ignore
+
+try:  # pragma: no cover
+    from matplotlib import cm as mpl_cm  # type: ignore
+except Exception:  # pragma: no cover
+    mpl_cm = None  # type: ignore
+
 from PIL import Image
 
 from src.gradcam import generate_gradcam, overlay_heatmap
@@ -44,6 +57,7 @@ TOP_DB      = 80.0
 # Load model once at module level
 _model = None
 _mel_w = None
+_mpl_magma = None
 
 
 def _linear_resample_1d(x: tf.Tensor, n_out: tf.Tensor) -> tf.Tensor:
@@ -188,9 +202,7 @@ def _load_audio_mono(file_path: str) -> tuple[tf.Tensor, int]:
 
     # audio shape: (n_samples, n_channels)
     if audio.shape.rank == 2 and int(audio.shape[1]) > 1:
-        rms = tf.sqrt(tf.reduce_mean(tf.square(audio), axis=0))
-        best = tf.argmax(rms)
-        audio = audio[:, best]
+        audio = tf.reduce_mean(audio, axis=1)
     else:
         audio = tf.squeeze(audio, axis=-1) if audio.shape.rank == 2 else tf.squeeze(audio)
 
@@ -254,21 +266,74 @@ def _get_model() -> tf.keras.Model:
     return _model
 
 
-def _audio_to_spectrogram(file_path: str) -> np.ndarray:
-    """
-    Load a .wav file and convert it to a normalised 128×128 RGB-like array.
+def _get_mpl_magma():
+    global _mpl_magma
+    if _mpl_magma is None:
+        if mpl_cm is None:  # pragma: no cover
+            raise ImportError("matplotlib is required for magma colormap")
+        _mpl_magma = mpl_cm.get_cmap("magma")
+    return _mpl_magma
+
+
+def _audio_to_spectrogram_librosa(file_path: str) -> np.ndarray:
+    """Training-aligned preprocessing using librosa + matplotlib.
+
+    This mirrors `src/generate_spectrograms.py` (mel spectrogram in dB, magma
+    colormap, origin='lower') without writing an intermediate PNG.
 
     Returns:
         numpy array of shape (128, 128, 3), float32, values in [0, 1].
     """
+    if librosa is None or mpl_cm is None:
+        raise ImportError("librosa/matplotlib not available")
+
+    y, sr = librosa.load(file_path, sr=SAMPLE_RATE, mono=True)
+    mel = librosa.feature.melspectrogram(
+        y=y,
+        sr=sr,
+        n_mels=N_MELS,
+        n_fft=N_FFT,
+        hop_length=HOP_LENGTH,
+    )
+    mel_db = librosa.power_to_db(mel, ref=np.max, top_db=TOP_DB).astype(np.float32)
+
+    # Match matplotlib imshow(origin='lower')
+    mel_db = np.flipud(mel_db)
+
+    vmin = float(np.min(mel_db))
+    vmax = float(np.max(mel_db))
+    denom = (vmax - vmin) if (vmax - vmin) > 1e-6 else 1.0
+    norm = (mel_db - vmin) / denom
+    norm = np.clip(norm, 0.0, 1.0)
+
+    cmap = _get_mpl_magma()
+    rgba = cmap(norm)  # RGBA float in [0,1]
+    rgb = (rgba[:, :, :3] * 255.0).astype(np.uint8)
+
+    img_pil = Image.fromarray(rgb, mode="RGB")
+    img_pil = img_pil.resize((IMG_SIZE, IMG_SIZE), resample=Image.BILINEAR)
+    img_arr = np.asarray(img_pil, dtype=np.float32) / 255.0
+    return img_arr.astype(np.float32)
+
+
+def _audio_to_spectrogram_tf(file_path: str) -> np.ndarray:
+    """TensorFlow-only preprocessing fallback.
+
+    Note: This is kept for environments where librosa/matplotlib are unavailable.
+    """
     if tf is None:
         raise ImportError("TensorFlow is required.")
 
-    audio, sr = _load_audio_mono(file_path)
+    audio, _sr = _load_audio_mono(file_path)
 
-    # Match librosa.stft(center=True) by padding n_fft//2 on both sides.
+    # Match librosa.stft(center=True, pad_mode='reflect') by padding n_fft//2.
     pad = N_FFT // 2
-    audio = tf.pad(audio, paddings=[[pad, pad]])
+    n_dyn = tf.shape(audio)[0]
+    audio = tf.cond(
+        n_dyn > pad,
+        lambda: tf.pad(audio, paddings=[[pad, pad]], mode="REFLECT"),
+        lambda: tf.pad(audio, paddings=[[pad, pad]], mode="CONSTANT"),
+    )
 
     stft = tf.signal.stft(
         audio,
@@ -308,7 +373,17 @@ def _audio_to_spectrogram(file_path: str) -> np.ndarray:
     img_pil = Image.fromarray(img, mode="RGB")
     img_pil = img_pil.resize((IMG_SIZE, IMG_SIZE), resample=Image.BILINEAR)
     img_arr = np.asarray(img_pil, dtype=np.float32) / 255.0
-    return img_arr
+    return img_arr.astype(np.float32)
+
+
+def _audio_to_spectrogram(file_path: str) -> np.ndarray:
+    """Load a .wav file and convert it to a normalised 128×128 RGB-like array."""
+    if librosa is not None and mpl_cm is not None:
+        try:
+            return _audio_to_spectrogram_librosa(file_path)
+        except Exception:
+            pass
+    return _audio_to_spectrogram_tf(file_path)
 
 
 def predict_audio(
