@@ -4,8 +4,9 @@
 numpy
 pillow
 
-# TensorFlow runtime (large wheel; Railway build is hardened via `nixpacks.toml` retries/timeouts)
-tensorflow==2.21.0
+# TensorFlow: use smaller CPU wheels on Linux (Railway/Streamlit Cloud)
+tensorflow-cpu==2.21.0; platform_system=="Linux"
+tensorflow==2.21.0; platform_system=="Windows"
 
 # Audio conversion (bundled ffmpeg binary)
 imageio-ffmpeg==0.6.0
